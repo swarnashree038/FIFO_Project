@@ -1,0 +1,130 @@
+// ============================================================
+//  TESTBENCH — ORIGINAL SYNC FIFO
+//  Counts toggle activity to estimate dynamic power
+//  Save this console output — compare with low power version
+// ============================================================
+ 
+`timescale 1ns/1ps
+ 
+module tb_fifo_original;
+ 
+// ---- Signals ----
+reg        clk, rst;
+reg        wr_en, rd_en;
+reg  [7:0] data_in;
+wire [7:0] data_out;
+wire       full, empty;
+ 
+// ---- Instantiate DUT ----
+sync_fifo_original uut (
+    .clk(clk), .rst(rst), .wr_en(wr_en), .rd_en(rd_en),
+    .data_in(data_in), .data_out(data_out),
+    .full(full), .empty(empty)
+);
+ 
+// ---- Clock: 10ns period (100 MHz) ----
+initial clk = 0;
+always #5 clk = ~clk;
+ 
+// ---- Power monitoring counters ----
+integer mem_clk_toggles;
+integer out_bus_toggles;
+integer write_cycles;
+integer read_cycles;
+integer total_cycles;
+reg [7:0] prev_data_out;
+ 
+always @(posedge clk) begin
+    mem_clk_toggles = mem_clk_toggles + 1;
+    total_cycles    = total_cycles + 1;
+    if (data_out !== prev_data_out) begin
+        out_bus_toggles = out_bus_toggles + 1;
+        prev_data_out   = data_out;
+    end
+    if (wr_en && !full)  write_cycles = write_cycles + 1;
+    if (rd_en && !empty) read_cycles  = read_cycles  + 1;
+end
+reg [7:0] expected [0:7];
+integer   exp_idx;
+integer   err_count;
+ 
+initial begin
+    $dumpfile("dump.vcd");
+    $dumpvars(0, tb_fifo_original);
+ 
+    mem_clk_toggles = 0; out_bus_toggles = 0;
+    write_cycles = 0; read_cycles = 0;
+    total_cycles = 0; err_count = 0;
+    exp_idx = 0; prev_data_out = 8'b0;
+ 
+    rst = 1; wr_en = 0; rd_en = 0; data_in = 0;
+    repeat(3) @(posedge clk); #1;
+    rst = 0;
+ 
+    $display("=== ORIGINAL SYNC FIFO — SIMULATION START ===");
+    $display("After reset: empty=%b full=%b", empty, full);
+ 
+    // Phase 1: Write 8 values
+    $display("--- Phase 1: Writing 8 values ---");
+    repeat(8) begin
+        @(posedge clk); #1;
+        wr_en = 1; data_in = ($random) % 256;
+        expected[exp_idx] = data_in; exp_idx = exp_idx + 1;
+        $display("  WRITE [%0d]: data=%3d | full=%b empty=%b",
+                  exp_idx-1, data_in, full, empty);
+    end
+    @(posedge clk); #1; wr_en = 0;
+ 
+    // Phase 2: Write when full
+    $display("--- Phase 2: Write attempt when full ---");
+    @(posedge clk); #1; wr_en = 1; data_in = 8'hFF;
+    @(posedge clk); #1; wr_en = 0;
+    $display("  Write attempted: full=%b (no change expected)", full);
+ 
+    // Phase 3: Read all 8 values
+    $display("--- Phase 3: Reading 8 values ---");
+    begin : read_loop
+        integer j;
+        for (j = 0; j < 8; j = j + 1) begin
+            @(posedge clk); #1; rd_en = 1;
+            @(posedge clk); #1; rd_en = 0;
+            if (data_out !== expected[j]) begin
+                $display("  READ [%0d]: %3d EXPECTED=%3d *** MISMATCH ***",
+                          j, data_out, expected[j]);
+                err_count = err_count + 1;
+            end else
+                $display("  READ [%0d]: %3d CORRECT", j, data_out);
+        end
+    end
+ 
+    // Phase 4: 20 idle cycles
+    $display("--- Phase 4: 20 idle cycles ---");
+    repeat(20) @(posedge clk); #1;
+ 
+    // Phase 5: Interleaved write+read
+    $display("--- Phase 5: Interleaved write and read ---");
+    repeat(4) begin
+        @(posedge clk); #1; wr_en = 1;
+          data_in = ($random) % 256;
+        @(posedge clk); #1; wr_en = 0; rd_en = 1;
+        @(posedge clk); #1; rd_en = 0;
+    end
+ 
+    #20;
+    $display("=== POWER REPORT — ORIGINAL FIFO ===");
+    $display("  Total clock cycles           : %0d", total_cycles);
+    $display("  Useful write cycles          : %0d", write_cycles);
+    $display("  Mem clock toggles (no gate)  : %0d", mem_clk_toggles);
+    $display("  Output bus transitions       : %0d", out_bus_toggles);
+    $display("  Wasted mem clock pulses      : %0d",
+              mem_clk_toggles - write_cycles);
+    $display("  Write efficiency             : %0d%%",
+              (write_cycles * 100) / mem_clk_toggles);
+    if (err_count == 0)
+        $display("  CORRECTNESS: ALL READS MATCHED — PASS");
+    else
+        $display("  CORRECTNESS: %0d MISMATCHES — FAIL", err_count);
+    $finish;
+end
+ 
+endmodule
